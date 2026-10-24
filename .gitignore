@@ -32,3 +32,9 @@
 /patch_*.py
 __pycache__/
 *.pyc
+
+# ---- Release archives ------------------------------------------------------
+*.zip
+
+# ---- Private tester handout ------------------------------------------------
+/TESTER-INSTRUCTIONS.txt
