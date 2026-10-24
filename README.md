@@ -115,10 +115,11 @@ Three different things get called "emulation". Being precise:
 - **Coverage is measured, not assumed.** 100% native was proven for the boot,
   the title screen, the menu and stage 1 (up to ~7 200 frames / 2 minutes). Later
   stages, bosses, the ending and the sound test have not been exercised yet, so a
-  previously unseen 68K address could still appear. The runner prints
-  `[FLOORCOUNT] entries=N` at exit and writes `floor_coverage.toml`; any address
-  listed there is folded into `alisia_discovery.toml` and the build is repeated.
-  That file is the to-do list for full-game coverage.
+  previously unseen 68K address could still appear. Every run prints
+  `[COVERAGE] floor_entries=N z80_fallback_pcs=N` at exit (however you quit) and
+  writes `floor_coverage.toml`; any address listed there is folded into
+  `alisia_discovery.toml` and the build is repeated. That file is the to-do list
+  for full-game coverage — see "Reporting coverage from a play session" below.
 - **Video is the native VDP pass**, integer-scaled to the window. No per-game
   custom renderer, so no true widescreen and no pixel-perfect integer scaling at
   4K yet (a 320×224 source in a 3840×2160 window is a non-integer 12×9.64
@@ -209,6 +210,25 @@ Measurements from this repository's validation runs:
 | Z80 interpreter fallbacks | 8 PCs, boot window only |
 | Audio WAV parity, 900 frames (boot) | identical, 0 differing bytes |
 | Audio WAV parity, 3 200 frames (title → stage 1) | identical, `048fdd00acad9d2d` |
+
+---
+
+## Reporting coverage from a play session
+
+The only way to prove full-game coverage is to play the whole game. Anyone can
+contribute the evidence:
+
+1. Play as far as you can (later stages, bosses, the ending). Quitting with `Esc`
+   or closing the window both flush the logs.
+2. Send back the files the runner wrote next to the executable:
+   - `floor_coverage.toml` — 68K addresses that needed the interpreter
+   - `dispatch_misses.toml`, `interior_label_misses.toml`, `floor_unsafe.toml`
+   - the `[COVERAGE]` line printed at exit, if you ran it from a terminal
+3. Each `floor_coverage` entry is verified as code, appended to
+   `alisia_discovery.toml`, and the build is regenerated. When the list stays
+   empty across a full playthrough, the 68K is 100% native for the whole game.
+
+An empty `floor_coverage.toml` (`entries: 0`) is the success signal.
 
 ---
 

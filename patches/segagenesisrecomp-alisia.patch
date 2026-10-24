@@ -330,7 +330,7 @@ index d087570..2d4f165 100644
      if (s_io_log_enabled && byte_addr >= 0xA10000u && byte_addr <= 0xA1001Fu) {
          if (s_io_log_count < 200) {
 diff --git a/runner/main.c b/runner/main.c
-index 9a7c72b..04af2da 100644
+index 9a7c72b..459be7f 100644
 --- a/runner/main.c
 +++ b/runner/main.c
 @@ -2290,6 +2290,18 @@ int main(int argc, char *argv[])
@@ -437,6 +437,28 @@ index 9a7c72b..04af2da 100644
      if (benchmark_frames || runtime_measure_frames) {
          Uint64 benchmark_end = SDL_GetPerformanceCounter();
          double seconds = (double)(benchmark_end - benchmark_start)
+@@ -3867,6 +3927,21 @@ session_begin:;
+     }
+ 
+     /* --- Cleanup --- */
++    {   /* Always persist the coverage evidence, however the player quits:
++         * the floor log is the to-do list for full-game native coverage. */
++        extern void runtime_evidence_flush(void);
++        extern int runtime_evidence_count(int kind);
++        runtime_evidence_flush();
++#ifdef GENESIS_Z80_RECOMP
++        { extern uint64_t z80_recomp_fallback_steps(void);
++          extern uint32_t z80_recomp_fallback_unique_pcs(void);
++          fprintf(stderr, "[COVERAGE] floor_entries=%d z80_fallback_pcs=%u z80_fallback_steps=%llu\n",
++                  runtime_evidence_count(1), z80_recomp_fallback_unique_pcs(),
++                  (unsigned long long)z80_recomp_fallback_steps()); }
++#else
++        fprintf(stderr, "[COVERAGE] floor_entries=%d\n", runtime_evidence_count(1));
++#endif
++    }
+ #if GENESIS_HAS_RECOMP_NET
+     genesis_netplay_print_summary();
+     genesis_netplay_shutdown();
 diff --git a/runner/z80_recomp.c b/runner/z80_recomp.c
 index d470ff6..6362bd3 100644
 --- a/runner/z80_recomp.c
