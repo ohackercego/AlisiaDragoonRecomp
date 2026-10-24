@@ -1,0 +1,14 @@
+# SmsRecomp project for the Alisia Dragoon Z80 sound driver.
+#
+# `rom` is resolved relative to THIS file's directory. Run after
+# `python tools/extract_z80_image.py alisia_usa.md` has produced
+# z80/z80_driver_image.bin from your own cartridge dump.
+#
+#   SmsRecomp.exe --game z80/z80game.toml --flat-step --output-dir z80
+#
+# --flat-step emits one C entry point per Z80 PC (8192), which is the shape the
+# Genesis runner's Z80 adapter (runner/z80_recomp.c) dispatches on.
+[game]
+output_prefix = "alisia_z80"
+rom = "z80_driver_image.bin"
+platform = "sms"

@@ -1,0 +1,453 @@
+diff --git a/runner/audio.c b/runner/audio.c
+index dad167b..943e113 100644
+--- a/runner/audio.c
++++ b/runner/audio.c
+@@ -321,6 +321,20 @@ void audio_flush(uint32_t wall_frame, int realtime,
+     s_stats.total_fm_frames  += fm_frames;
+     s_stats.total_psg_frames += psg_frames;
+     s_stats.total_flushes++;
++    {   /* ALISIA_AUDIO_STATS=1: prove whether the device is being fed. */
++        static int s_dbg = -1;
++        if (s_dbg < 0) { const char *e = getenv("ALISIA_AUDIO_STATS"); s_dbg = (e && *e && *e != '0'); }
++        if (s_dbg && (s_stats.total_flushes % 600u) == 0u) {
++            uint64_t pushed = 0, overflow = 0;
++            audio_get_bridge_counts(&pushed, &overflow);
++            fprintf(stderr, "[AUDSTAT] flushes=%u underrun=%u dropped=%u turbo_dropped=%u "
++                            "min_queued=%u pushed=%llu overflow=%llu realtime=%d playback=%d\n",
++                    s_stats.total_flushes, s_stats.underrun_flushes, s_stats.dropped_flushes,
++                    s_stats.turbo_dropped_flushes, s_stats.min_queued_bytes,
++                    (unsigned long long)pushed, (unsigned long long)overflow,
++                    (int)realtime, (int)s_playback_enabled);
++        }
++    }
+ }
+ 
+ /* =========================================================================
+diff --git a/runner/glue.c b/runner/glue.c
+index d087570..2d4f165 100644
+--- a/runner/glue.c
++++ b/runner/glue.c
+@@ -48,11 +48,23 @@ int genesis_game_instruction_hook(uint32_t pc)
+     return g_game_spec.instruction_hook ? g_game_spec.instruction_hook(pc) : 0;
+ }
+ 
++uint32_t g_alisia_ret_ring[16];
++int      g_alisia_ret_i = 0;
++long     g_alisia_trace_lo = -2, g_alisia_trace_hi = -2;
+ void recomp_push_return(uint32_t ret_addr)
+ {
+     if (g_game_layout.initial_ssp && g_cpu.A[7] > g_game_layout.initial_ssp)
+         g_cpu.A[7] = g_game_layout.initial_ssp;
+ 
++    g_alisia_ret_ring[g_alisia_ret_i & 15] = ret_addr & 0xFFFFFFu;
++    g_alisia_ret_i++;
++    { extern uint64_t g_frame_count; extern long g_alisia_trace_lo, g_alisia_trace_hi;
++      if (g_alisia_trace_lo >= 0 && (long)g_frame_count >= g_alisia_trace_lo &&
++          (long)g_frame_count <= g_alisia_trace_hi)
++          fprintf(stderr, "[JSR] f=%llu site=%06X ret=%06X d0=%08X sr=%04X\n",
++                  (unsigned long long)g_frame_count, (unsigned)((ret_addr - 4u) & 0xFFFFFFu),
++                  (unsigned)(ret_addr & 0xFFFFFFu), (unsigned)g_cpu.D[0], (unsigned)g_cpu.SR);
++    }
+     g_cpu.A[7] -= 4;
+     m68k_write32(g_cpu.A[7], ret_addr & 0xFFFFFFu);
+ }
+@@ -834,8 +846,10 @@ static int interleave_irq_on(void) {
+ uint32_t g_68k_stamp_rebase = 0;
+ extern uint32_t machine_z80_stamp(void);   /* raster cursor, master cycles */
+ 
++unsigned long g_alisia_vint_delivered = 0;
+ static void own_deliver_vint(GVDP *vdp)
+ {
++    g_alisia_vint_delivered++;
+     const uint32_t STK = g_game_layout.intr_stack;
+     uint32_t byteoff = (STK - 256u) & 0xFFFFu;
+     uint8_t save[256];
+@@ -1209,6 +1223,107 @@ void glue_service_vblank(void)
+      * one-frame delay in button edge detection. */
+ 
+     glue_log_frame_state(g_frame_count);
++    {
++        static unsigned long long s_last_insn = 0;
++        static unsigned s_stall_frames = 0;
++        static int s_dbg = -1;
++        extern unsigned long g_z80poll_yields;
++        if (s_dbg < 0) { const char *e = getenv("ALISIA_DBG"); s_dbg = (e && *e && *e != '0'); }
++        { extern long g_alisia_trace_lo, g_alisia_trace_hi;
++          if (g_alisia_trace_lo == -2) {
++              const char *tf = getenv("ALISIA_TRACE_FRAMES");
++              g_alisia_trace_lo = -1;
++              if (tf) { long a = -1, b = -1; if (sscanf(tf, "%ld-%ld", &a, &b) >= 2) { g_alisia_trace_lo = a; g_alisia_trace_hi = b; } }
++          } }
++        if (s_dbg) {
++            if (g_native_insn_count == s_last_insn) {
++                s_stall_frames++;
++                if (s_stall_frames == 5 || (s_stall_frames % 120) == 0)
++                    fprintf(stderr, "[STALL] frame=%llu no-insn frames=%u z80pc=%04X "
++                            "reset_off=%d busreq=%d debt=%u a12=%02X\n",
++                            (unsigned long long)g_frame_count, s_stall_frames,
++                            (unsigned)g_machine.z80.pc,
++                            (int)g_machine.bus.z80_reset_off, (int)g_machine.bus.z80_busreq,
++                            (unsigned)g_machine.z80_cycle_debt, g_machine.bus.z80_ram[0x12]);
++            } else {
++                if (s_stall_frames >= 5)
++                    fprintf(stderr, "[STALL] resumed at frame=%llu after %u frames\n",
++                            (unsigned long long)g_frame_count, s_stall_frames);
++                s_stall_frames = 0;
++            }
++            s_last_insn = g_native_insn_count;
++            {   /* one-shot Z80 RAM dump for reference comparison */
++                static int s_zdone = 0;
++                const char *zf = getenv("ALISIA_Z80DUMP");
++                if (zf && !s_zdone) {
++                    char want[32]; const char *colon = strchr(zf, ':');
++                    long fno = -1;
++                    if (colon) {
++                        size_t n = (size_t)(colon - zf); if (n > 31) n = 31;
++                        memcpy(want, zf, n); want[n] = 0; fno = atol(want);
++                    }
++                    if (colon && (long)g_frame_count >= fno) {
++                        FILE *fz = fopen(colon + 1, "wb");
++                        if (fz) {
++                            fwrite(g_machine.bus.z80_ram, 1, 0x2000, fz);
++                            fclose(fz);
++                            fprintf(stderr, "[Z80DUMP] wrote %s at frame %llu\n",
++                                    colon + 1, (unsigned long long)g_frame_count);
++                        }
++                        s_zdone = 1;
++                    }
++                }
++            }
++            if ((g_frame_count % 120) == 0) {
++                static unsigned s_z80pc_last = 0; static unsigned s_z80pc_same = 0;
++                if (g_machine.z80.pc == s_z80pc_last) s_z80pc_same++; else s_z80pc_same = 0;
++                s_z80pc_last = g_machine.z80.pc;
++                fprintf(stderr, "[FRAME] frame=%llu insn=%llu z80pc=%04X z80yields=%lu "
++                        "z80same=%u halt=%d iff1=%d sp=%04X a=%02X hl=%02X%02X "
++                        "a12=%02X a18=%02X\n",
++                        (unsigned long long)g_frame_count,
++                        (unsigned long long)g_native_insn_count,
++                        (unsigned)g_machine.z80.pc, g_z80poll_yields, s_z80pc_same,
++                        (int)g_machine.z80.halted, (int)g_machine.z80.iff1,
++                        (unsigned)g_machine.z80.sp, (unsigned)g_machine.z80.a,
++                        (unsigned)g_machine.z80.h, (unsigned)g_machine.z80.l,
++                        g_machine.bus.z80_ram[0x12], g_machine.bus.z80_ram[0x18]);
++                { extern uint32_t g_alisia_ret_ring[16]; extern int g_alisia_ret_i; int q;
++                  fprintf(stderr, "[RET]");
++                  for (q = 15; q >= 0; q--)
++                      fprintf(stderr, " %06X", (unsigned)g_alisia_ret_ring[(g_alisia_ret_i - 1 - q) & 15]);
++                  fprintf(stderr, "\n"); }
++                { extern unsigned long g_alisia_vint_delivered;
++                  fprintf(stderr, "[VINT] delivered=%lu vdpR0=%02X R1=%02X R10=%02X in_vb=%d\n",
++                          g_alisia_vint_delivered, (unsigned)g_machine.vdp.reg[0],
++                          (unsigned)g_machine.vdp.reg[1], (unsigned)g_machine.vdp.reg[10],
++                          (int)g_machine.vdp.in_vblank); }
++#ifdef ALISIA_ACC_DIAG
++                { extern unsigned long g_z80acc[0x1000];
++                  int r; for (r = 0; r < 8; r++) { int k, bi = -1; unsigned long bv = 0;
++                    for (k = 0; k < 0x1000; k++) if (g_z80acc[k] > bv) { bv = g_z80acc[k]; bi = k; }
++                    if (bi < 0 || !bv) break;
++                    fprintf(stderr, "[Z80ACC] %04X x%lu", bi * 2, bv);
++                    g_z80acc[bi] = 0; }
++                  fprintf(stderr, "\n");
++                  for (r = 0; r < 0x1000; r++) g_z80acc[r] = 0; }
++#else
++                (void)0;
++#endif
++#ifdef ALISIA_ACC_DIAG
++                if (g_frame_count >= 1680 && (g_frame_count % 240) == 0) {
++                    extern uint32_t hacc_addr[1024]; extern unsigned long hacc_cnt[1024];
++                    int r; fprintf(stderr, "[HACC] frame=%llu", (unsigned long long)g_frame_count);
++                    for (r = 0; r < 8; r++) { int k, bi = -1; unsigned long bv = 0;
++                        for (k = 0; k < 1024; k++) if (hacc_cnt[k] > bv) { bv = hacc_cnt[k]; bi = k; }
++                        if (bi < 0 || !bv) break;
++                        fprintf(stderr, " %06X x%lu", (unsigned)hacc_addr[bi], bv);
++                        hacc_cnt[bi] = 0; }
++                    fprintf(stderr, "\n"); }
++#endif
++            }
++        }
++    }
+     g_frame_count++;
+     runtime_evidence_tick();   /* frame counter; periodic, rate-bounded flush */
+ }
+@@ -1610,11 +1725,24 @@ static inline void spin_check(uint32_t byte_addr, int is_write)
+ }
+ 
+ 
++#ifdef ALISIA_ACC_DIAG
++#define HACC_SLOTS 1024
++uint32_t hacc_addr[HACC_SLOTS];
++unsigned long hacc_cnt[HACC_SLOTS];
++static void hacc_add(uint32_t a) { unsigned i = ((a ^ (a >> 8)) * 2654435761u >> 12) & (HACC_SLOTS - 1);
++    if (hacc_cnt[i] && hacc_addr[i] != a) { hacc_cnt[i] = 0; } hacc_addr[i] = a; hacc_cnt[i]++; }
++unsigned long g_z80acc[0x1000];  /* per-word access counters in $A00000-$A01FFF */
++#define Z80ACC(a) do { hacc_add(a); if (((a) & 0xFFFF0000u) == 0x00A00000u) g_z80acc[((a) >> 1) & 0xFFFu]++; } while (0)
++#else
++#define Z80ACC(a) do {} while (0)
++#endif
++
+ uint16_t m68k_read16(uint32_t byte_addr)
+ {
+     byte_addr &= 0xFFFFFFu;
+     watchdog_check(byte_addr, 0, 0);
+     bus_ring_push(byte_addr, 1);
++    Z80ACC(byte_addr);
+     spin_check(byte_addr, 0);
+     HYBRID_BUMP_CYCLES();
+     return gbus_read16(&g_machine.bus, byte_addr);
+@@ -1637,6 +1765,7 @@ uint8_t m68k_read8(uint32_t byte_addr)
+     byte_addr &= 0xFFFFFFu;
+     watchdog_check(byte_addr, 0, 0);
+     bus_ring_push(byte_addr, 0);
++    Z80ACC(byte_addr);
+     /* Z80 sync polls — the SMPS sound driver and Z80 bus arbiter both
+      * require the Z80 to actually advance before responding. In native
+      * mode the game fiber can run thousands of instructions without
+@@ -1653,21 +1782,65 @@ uint8_t m68k_read8(uint32_t byte_addr)
+      * Bounded fallback: if a single read polls > 256 times without
+      * resolving (corrupted Z80 state, dead driver), return 0 so we
+      * don't hang. Counter resets across distinct read addresses. */
+-    if (byte_addr == 0xA01FFDu || byte_addr == 0xA01FFFu || byte_addr == 0xA11100u) {
++    /* Z80 sync window: the bus-request/ack register ($A11100) and the whole
++     * Z80 RAM window ($A00000-$A01FFF, where every sound driver keeps its
++     * command/status mailbox). A 68K poll loop that alternates between these
++     * addresses would otherwise never trip spin_check (which tracks a single
++     * address) and could starve the Z80 forever. Yield on a repeated address so
++     * the scheduler steps the Z80, then read the REAL value — never fabricate
++     * one. Bounded: after 4096 consecutive polls we stop yielding for this
++     * streak so a genuinely dead driver cannot wedge the runner. */
++    if (byte_addr == 0xA11100u ||
++        (byte_addr >= 0xA00000u && byte_addr < 0xA02000u)) {
+         if (s_interleave_active && !s_in_vblank_service) {
++            static unsigned long s_bus_n = 0;
++            static int s_bus_dbg = -1;
++            if (s_bus_dbg < 0) { const char *e = getenv("ALISIA_DBG"); s_bus_dbg = (e && *e && *e != '0'); }
++            if (s_bus_dbg && byte_addr == 0xA11100u && (++s_bus_n % 5000ul) == 0ul) {
++                uint32_t ra = ((uint32_t)gbus_read16(&g_machine.bus, g_cpu.A[7] & 0xFFFFFFu) << 16)
++                            | (uint32_t)gbus_read16(&g_machine.bus, (g_cpu.A[7] + 2u) & 0xFFFFFFu);
++                fprintf(stderr, "[A11100] n=%lu frame=%llu ack=%02X busreq=%d reset_off=%d "
++                        "z80pc=%04X halt=%d iff1=%d ret=%06X D0=%08X D1=%08X A0=%06X A7=%06X\n",
++                        s_bus_n, (unsigned long long)g_frame_count,
++                        (unsigned)gbus_read16(&g_machine.bus, 0xA11100u),
++                        (int)g_machine.bus.z80_busreq, (int)g_machine.bus.z80_reset_off,
++                        (unsigned)g_machine.z80.pc, (int)g_machine.z80.halted,
++                        (int)g_machine.z80.iff1, (unsigned)(ra & 0xFFFFFFu),
++                        (unsigned)g_cpu.D[0], (unsigned)g_cpu.D[1],
++                        (unsigned)(g_cpu.A[0] & 0xFFFFFFu), (unsigned)(g_cpu.A[7] & 0xFFFFFFu));
++                fprintf(stderr, "[A11100] D=%08X %08X %08X %08X %08X %08X %08X "
++                        "A=%06X %06X %06X %06X %06X %06X SP=%06X:%04X %04X %04X %04X %04X %04X %04X\n",
++                        (unsigned)g_cpu.D[0], (unsigned)g_cpu.D[1], (unsigned)g_cpu.D[2],
++                        (unsigned)g_cpu.D[3], (unsigned)g_cpu.D[4], (unsigned)g_cpu.D[5],
++                        (unsigned)g_cpu.D[6],
++                        (unsigned)(g_cpu.A[0] & 0xFFFFFFu), (unsigned)(g_cpu.A[1] & 0xFFFFFFu),
++                        (unsigned)(g_cpu.A[2] & 0xFFFFFFu), (unsigned)(g_cpu.A[3] & 0xFFFFFFu),
++                        (unsigned)(g_cpu.A[4] & 0xFFFFFFu), (unsigned)(g_cpu.A[6] & 0xFFFFFFu),
++                        (unsigned)(g_cpu.A[7] & 0xFFFFFFu),
++                        (unsigned)gbus_read16(&g_machine.bus, (g_cpu.A[7] + 0u) & 0xFFFFFFu),
++                        (unsigned)gbus_read16(&g_machine.bus, (g_cpu.A[7] + 2u) & 0xFFFFFFu),
++                        (unsigned)gbus_read16(&g_machine.bus, (g_cpu.A[7] + 4u) & 0xFFFFFFu),
++                        (unsigned)gbus_read16(&g_machine.bus, (g_cpu.A[7] + 6u) & 0xFFFFFFu),
++                        (unsigned)gbus_read16(&g_machine.bus, (g_cpu.A[7] + 8u) & 0xFFFFFFu),
++                        (unsigned)gbus_read16(&g_machine.bus, (g_cpu.A[7] + 10u) & 0xFFFFFFu),
++                        (unsigned)gbus_read16(&g_machine.bus, (g_cpu.A[7] + 12u) & 0xFFFFFFu));
++            }
+             if (byte_addr == s_z80poll_last_addr) {
+-                if (++s_z80poll_streak > 256) {
++                if (++s_z80poll_streak > 4096) {
+                     extern unsigned long g_z80poll_fallback_hits; /* [POLL-DIAG] */
+                     g_z80poll_fallback_hits++;
+-                    return 0x00u;
++                    s_z80poll_streak = 0;   /* stop yielding; still read the real value */
+                 }
+             } else {
+                 s_z80poll_last_addr = byte_addr;
+                 s_z80poll_streak    = 1;
+             }
+-            { extern unsigned long g_z80poll_yields; g_z80poll_yields++; } /* [POLL-DIAG] */
+-            { char stack_marker; game_stack_note("z80-poll", &stack_marker); }
+-            yield_to_main(GLUE_YIELD_Z80POLL);
++            if (s_z80poll_streak > 0) {
++                { extern unsigned long g_z80poll_yields; g_z80poll_yields++; } /* [POLL-DIAG] */
++                { char stack_marker; game_stack_note("z80-poll", &stack_marker); }
++                s_watchdog_counter = 0;
++                yield_to_main(GLUE_YIELD_Z80POLL);
++            }
+             /* fall through to real read */
+         } else {
+             return 0x00u;  /* outside interleave: keep old shortcut */
+@@ -1709,8 +1882,19 @@ uint32_t m68k_read32(uint32_t byte_addr)
+ void m68k_write16(uint32_t byte_addr, uint16_t val)
+ {
+     byte_addr &= 0xFFFFFFu;
++    if (byte_addr == 0x00FF05B8u && getenv("ALISIA_DBG")) {
++        extern uint32_t g_alisia_ret_ring[16]; extern int g_alisia_ret_i;
++        fprintf(stderr, "[W05B8] f=%llu val=%04X lastret=%06X ring=%06X,%06X,%06X d0=%08X d1=%08X a0=%06X\n",
++                (unsigned long long)g_frame_count, (unsigned)val,
++                (unsigned)g_alisia_ret_ring[(g_alisia_ret_i - 1) & 15],
++                (unsigned)g_alisia_ret_ring[(g_alisia_ret_i - 1) & 15],
++                (unsigned)g_alisia_ret_ring[(g_alisia_ret_i - 2) & 15],
++                (unsigned)g_alisia_ret_ring[(g_alisia_ret_i - 3) & 15],
++                (unsigned)g_cpu.D[0], (unsigned)g_cpu.D[1], (unsigned)(g_cpu.A[0] & 0xFFFFFFu));
++    }
+     watchdog_check(byte_addr, 1, val);
+     bus_ring_push(byte_addr, 4);
++    Z80ACC(byte_addr);
+     /* 16-bit FM writes land one byte per port per cycle on hardware. The
+      * YM2612 only takes 8-bit data; SMPS always uses 8-bit writes. Be
+      * defensive: if a 16-bit write hits the FM bus, treat the low byte
+@@ -1722,13 +1906,33 @@ void m68k_write16(uint32_t byte_addr, uint16_t val)
+         g_mem_write_trace_fn(byte_addr + 1u, (uint8_t)val,        g_audio_cycle_counter);
+     }
+     gbus_write16(&g_machine.bus, byte_addr, val);
++    /* Z80 bus release: the 68K hands the bus back here, and this is the only
++     * point where the sound driver can actually consume a command written to
++     * its mailbox ($A00000-$A01FFF) during the same 68K chunk. Without a yield
++     * here the Z80 is only stepped at the next scanline boundary, so a 68K poll
++     * loop that re-requests the bus every iteration starves it and the mailbox
++     * never clears — the Alisia Dragoon "START does not load" deadlock. */
++    if (byte_addr == 0xA11100u && (val & 0x0100u) == 0u &&
++        s_interleave_active && !s_in_vblank_service) {
++        extern unsigned long g_z80poll_yields;
++        g_z80poll_yields++;
++        s_watchdog_counter = 0;
++        yield_to_main(GLUE_YIELD_Z80POLL);
++    }
+ }
+ 
+ void m68k_write8(uint32_t byte_addr, uint8_t val)
+ {
+     byte_addr &= 0xFFFFFFu;
++    if ((byte_addr == 0x00FF05B8u || byte_addr == 0x00FF05B9u) && getenv("ALISIA_DBG")) {
++        extern uint32_t g_alisia_ret_ring[16]; extern int g_alisia_ret_i;
++        fprintf(stderr, "[W05B8b] f=%llu addr=%06X val=%02X lastret=%06X\n",
++                (unsigned long long)g_frame_count, (unsigned)byte_addr, (unsigned)val,
++                (unsigned)g_alisia_ret_ring[(g_alisia_ret_i - 1) & 15]);
++    }
+     watchdog_check(byte_addr, 1, val);
+     bus_ring_push(byte_addr, 3);
++    Z80ACC(byte_addr);
+     audio_detour_write(byte_addr, val);
+     if (s_io_log_enabled && byte_addr >= 0xA10000u && byte_addr <= 0xA1001Fu) {
+         if (s_io_log_count < 200) {
+diff --git a/runner/main.c b/runner/main.c
+index 9a7c72b..04af2da 100644
+--- a/runner/main.c
++++ b/runner/main.c
+@@ -2290,6 +2290,18 @@ int main(int argc, char *argv[])
+     }
+     app_config_defaults();
+     app_config_load(settings_ini);   /* also seeds g_input_map controller bindings */
++    /* ALISIA_WRITE_SETTINGS=1: (re)write settings.ini with the full [input.pN]
++     * binding tables so controllers can be remapped by hand, without the launcher. */
++    { const char *e = getenv("ALISIA_WRITE_SETTINGS");
++      if (e && *e && *e != '0')
++          fprintf(stderr, "[settings] write %s: %s\n", settings_ini,
++                  app_config_save(settings_ini) ? "ok" : "failed"); }
++    { const char *e = getenv("ALISIA_DBG_CFG");
++      if (e && *e)
++          fprintf(stderr, "[cfg] %s -> skip_launcher=%d win=%d vol=%d p1.device=%d p1.pad_type=%d\n",
++                  settings_ini, g_app_config.skip_launcher, g_app_config.window_scale,
++                  g_app_config.volume, (int)g_input_map.p[0].device,
++                  (int)g_input_map.p[0].pad_type); }
+     if (g_game_spec.load_settings) g_game_spec.load_settings(settings_ini);
+ #if GENESIS_HAS_RECOMP_NET && RECOMP_LAUNCHER
+     {
+@@ -2350,9 +2362,15 @@ int main(int argc, char *argv[])
+         if (!positional_rom && !automation) {
+             static char cached_rom[600];
+             int booted_cached = 0;
++            { const char *e = getenv("ALISIA_DBG_CFG");
++              if (e && *e) fprintf(stderr, "[cfg] gate: skip=%d force=%d cfgpath=%s\n",
++                                   g_app_config.skip_launcher, force_launcher, rom_cfg_path); }
+             if (g_app_config.skip_launcher && !force_launcher &&
+                 rom_cfg_read(rom_cfg_path, cached_rom, sizeof cached_rom)) {
+                 FILE *probe = fopen(cached_rom, "rb");
++                { const char *e = getenv("ALISIA_DBG_CFG");
++                  if (e && *e) fprintf(stderr, "[cfg] rom_cfg=%s cached='%s' probe=%s\n",
++                                       rom_cfg_path, cached_rom, probe ? "ok" : "FAIL"); }
+                 if (probe) { fclose(probe); rom_path = cached_rom; booted_cached = 1; }
+             }
+             if (!booted_cached) {
+@@ -2392,6 +2410,25 @@ int main(int argc, char *argv[])
+ #endif
+     }
+ 
++    if (!rom_path) {
++        /* skip_launcher: boot the ROM remembered in rom-<SHORT>.cfg straight
++         * away, without showing the file picker. The launcher gate exists only
++         * on launcher-enabled builds; this keeps the behaviour for the plain
++         * runner too. */
++        static char cached_boot[600];
++        if (g_app_config.skip_launcher &&
++            rom_cfg_read(rom_cfg_path, cached_boot, sizeof cached_boot)) {
++            FILE *probe = fopen(cached_boot, "rb");
++            if (probe) {
++                fclose(probe);
++                rom_path = cached_boot;
++                fprintf(stderr, "[ROM] cached: %s\n", rom_path);
++            } else {
++                fprintf(stderr, "[ROM] cached path missing: %s\n", cached_boot);
++            }
++        }
++    }
++
+     if (!rom_path) {
+ #ifdef _WIN32
+         static char picked_path[512] = {0};
+@@ -3157,10 +3194,16 @@ session_begin:;
+                         } else
+ #endif
+                         if (is_save) {
+-                            if (runner_save_state_file(slot_name))
++                            if (runner_save_state_file(slot_name)) {
+                                 genesis_local_states_slot_saved(slot);
++                                { char msg[64]; snprintf(msg,sizeof msg,"Saved slot %d (Shift+F%d)",slot,slot);
++                                  host_state_notice(msg); }
++                            }
++                        }
++                        else if (runner_load_state_file(slot_name)) {
++                            char msg[64]; snprintf(msg,sizeof msg,"Loaded slot %d (F%d)",slot,slot);
++                            host_state_notice(msg);
+                         }
+-                        else runner_load_state_file(slot_name);
+                     }
+                 }
+                 /* [SND-TRACE] F12 = dump the sound-command lifecycle ring AND
+@@ -3764,6 +3807,23 @@ session_begin:;
+ 
+     if (max_frames)
+         fprintf(stderr, "[DONE] %u frames completed\n", frame_num);
++#ifdef GENESIS_Z80_RECOMP
++    {   /* Z80 static-recomp coverage: interpreter fallbacks prove whether the
++         * captured driver image matches what the cartridge actually runs. */
++        extern uint64_t z80_recomp_fallback_steps(void);
++        extern uint32_t z80_recomp_fallback_unique_pcs(void);
++        fprintf(stderr, "[Z80RC] fallback_steps=%llu fallback_unique_pcs=%u\n",
++                (unsigned long long)z80_recomp_fallback_steps(),
++                z80_recomp_fallback_unique_pcs());
++    }
++#endif
++    {   /* Tier-3 floor: how many ROM addresses still need the interpreter. */
++        extern int runtime_evidence_count(int kind);
++        extern void runtime_evidence_sync(int kind);
++        fprintf(stderr, "[FLOORCOUNT] entries=%d\n",
++                runtime_evidence_count(1 /* RT_EVIDENCE_FLOOR_COVERAGE */));
++        runtime_evidence_sync(1 /* RT_EVIDENCE_FLOOR_COVERAGE */);
++    }
+     if (benchmark_frames || runtime_measure_frames) {
+         Uint64 benchmark_end = SDL_GetPerformanceCounter();
+         double seconds = (double)(benchmark_end - benchmark_start)
+diff --git a/runner/z80_recomp.c b/runner/z80_recomp.c
+index d470ff6..6362bd3 100644
+--- a/runner/z80_recomp.c
++++ b/runner/z80_recomp.c
+@@ -123,6 +123,9 @@ void sms_dispatch_miss(uint16_t addr)
+     if (!(s_fallback_seen[byte] & bit)) {
+         s_fallback_seen[byte] |= bit;
+         s_fallback_unique_pcs++;
++        fprintf(stderr, "[Z80RC] first fallback at PC=$%04X opcode=%02X %02X %02X %02X\n",
++                addr, sms_read8(addr), sms_read8((uint16_t)(addr+1)),
++                sms_read8((uint16_t)(addr+2)), sms_read8((uint16_t)(addr+3)));
+     }
+ }
+ 

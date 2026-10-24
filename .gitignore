@@ -1,0 +1,34 @@
+# ---- ROMs and ROM-derived artefacts: never commit these -------------------
+/alisia_usa.md
+/*.md.bak
+/z80/z80_driver_image.bin
+/z80/*_z80_step.c
+/z80/*_z80_step.h
+
+# ---- Build output ----------------------------------------------------------
+/build/
+/out/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+
+# ---- Runtime state / user settings ----------------------------------------
+/settings.ini
+/settings.ini.bak
+/rom-*.cfg
+/native_save_*.bin
+/floor_coverage*.toml
+/dispatch_misses.toml
+/floor_unsafe.toml
+/interior_label_misses.toml
+/annotations_from_disasm.csv
+*.wav
+*.log
+
+# ---- Scratch ---------------------------------------------------------------
+/recente.txt
+/patch_*.py
+__pycache__/
+*.pyc

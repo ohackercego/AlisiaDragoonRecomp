@@ -1,0 +1,18 @@
+# Alisia Dragoon USA cartridge integration. ROM identity verified from the local 1 MiB dump.
+[game]
+output_prefix = "alisia"
+jump_table_autodiscovery = true
+allow_68020_branch = false
+# Script/entity VM dispatch targets verified as code (see alisia_discovery.toml).
+discovery_files = ["alisia_discovery.toml"]
+
+[ram_layout]
+game_mode = 0xFF0450
+vint_runcount = 0xFF04F6
+vint_routine = 0xFF04D0
+plc_pending = 0xFF0452
+initial_ssp = 0x01000000
+vbla_stack = 0x01000000
+intr_stack = 0x01000000
+player_object = 0
+level_modes = []

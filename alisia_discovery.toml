@@ -1,0 +1,43 @@
+# Extra entry points proved to be CODE by the tier-3 floor log (floor_coverage.prev.toml).
+# These are dispatch targets of the game's script/entity VM, reached through a computed
+# jump table the heuristic finder cannot resolve. Each was disassembled and verified to
+# start on a valid 68K instruction boundary (move.w / jsr / clr.l / lea / rts chains).
+format_version = 1
+evidence_kind = "floor_entry"
+
+[functions]
+extra = [
+  0x0D884A,
+  0x0D88C6,
+  0x0D891C,
+  0x0D8926,
+  0x0D894E,
+  0x0D8402,
+  0x0D8AA4,
+  0x0DA9C4,
+  0x0DCF56,
+  0x0DCF72,
+  0x0DCF82,
+  0x0DD0CA,
+  0x0DD148,
+  0x0DD174,
+  0x0DD18A,
+  0x0DD1DE,
+  0x0DD202,
+  0x0DD248,
+  # --- second pass: helpers/trampolines still reached in the floor after the first batch ---
+  0x0DD028,
+  0x0DD050,
+  0x0DD078,
+  0x001668,
+  0x00169C,
+  0x0016CE,
+  0x0018E4,
+  0x001BBA,
+  0x0020B2,
+  0x002240,
+  0x0026FA,
+  0x002C3A,
+  0x002C6A,
+  0x003768,
+]
